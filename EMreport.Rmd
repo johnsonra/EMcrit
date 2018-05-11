@@ -1,0 +1,107 @@
+---
+title: "EM Report"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, cache = TRUE)
+library(MASS)
+library(tidyverse)
+library(readxl)
+library(stringr)
+library(pscl)
+library(parallel)
+library(boot)
+
+##### Data #####
+emData <- read_excel('EM Data (2016-2017).xlsx') %>%
+          mutate(Value = round(Value)) # zeroinfl requires integers for Value
+
+# remove spaces from names
+names(emData) <- str_replace_all(names(emData), ' ', '')
+
+# test methods and site classes
+testMethods <- unique(emData$TestMethod)
+siteClass <- unique(emData$SiteClassDesc)
+```
+
+
+```{r analysis, include=FALSE}
+#' function to calcualte the critical levels
+#'
+#' @details
+#' This function assumes emData is in the working environment that critLevels() is called from.
+#'
+#' @param m Test method
+#' @param c siteClass
+#' @param alpha1 Alpha level for triggering of notification
+#' @param alpha2 Alpha level for triggering of intervention
+#' @param vuongTest Logical flag to enable running the Vuong test to verify that the zero-invlated model is better than standard negative binomial regression
+#' 
+#' @return Returns critical levels for site class c for the test, m at two levels: alpha1 and alpha2.
+critLevels <- function(m, c, alpha1 = 0.95, alpha2 = 0.99, vuongTest = FALSE)
+{
+    if(file.exists(paste0('boot_', m, '_', c, '.RData')))
+    {
+        load(paste0('boot_', m, '_', c, '.RData'))
+    }else{
+        model0 <- zeroinfl(Value ~ 1 | SamplingLocation, dist = 'negbin',
+                           data = filter(emData, TestMethod == m &
+                                             SiteClassDesc == c))
+    
+        # check to see if zeroinfl is a better model than glm.nb
+        # seems to be the case for our data...
+        # this can take awhile, so we won't run it by default
+        if(vuongTest)
+        {
+            null0 <- glm.nb(Value ~ 1, data = filter(emData, TestMethod == m &
+                                                     SiteClassDesc == c))
+    
+            vuong(model0, null0)
+        }
+    
+        # this function will run one bootstrap sample & return the count statistic
+        boot_ci <- function(dat, i, counts, zeros)
+        {
+            require(pscl)
+            require(magrittr)
+            retval <- try({
+                zeroinfl(Value ~ 1 | SamplingLocation, dist = 'negbin',
+                        data = dat[i,], # start with one randomly picked row
+                        start = list(count = counts,
+                                     zero = zeros)) %>%
+                    summary() %>%        # summary object
+                    coef() %>%           # get coefficients
+                    `[[`(1) %>%          # first item is count estimates
+                    `[`(1,1)             # first row/first column = estimate
+            }, silent = TRUE)
+        
+            if(class(retval) == 'try-error')
+                return(NA)
+        
+            return(retval)
+        }
+    
+        # bootstrap samples
+        set.seed(389427)
+        bs_samples <- boot(filter(emData, TestMethod == m &
+                                          SiteClassDesc == c),
+                           boot_ci, stype = 'i', R = 15000, 
+                           parallel = 'snow', ncpus = detectCores(),
+                           counts = coef(model0, 'count'),
+                           zeros = coef(model0, 'zero'))
+        
+        save(bs_samples, file = paste0('boot_', m, '_', c, '.RData'))
+    }
+}
+
+# this contains our main table of results
+mainTable <- data_frame(method = rep(testMethods, each = 3),
+                        class = rep(siteClass, 3))
+
+# temporary for loop to get long part of analysis finished
+for(i in 1:dim(mainTable)[1])
+{
+    critLevels(mainTable$method[i], mainTable$class[i])
+}
+```
