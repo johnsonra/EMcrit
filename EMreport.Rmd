@@ -5,24 +5,26 @@ output: pdf_document
 
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE, cache = TRUE)
-library(MASS)
-library(tidyverse)
-library(readxl)
-library(stringr)
-library(pscl)
-library(parallel)
-library(boot)
+library(MASS)        # for glm.nb
+library(tidyverse)   # general data tidying and wrangling
+library(readxl)      # read from excel
+library(stringr)     # string functions
+library(pscl)        # Zero-inflation negative binomial regression
+library(parallel)    # allows running boot functions in parallel
+library(boot)        # does the boot strap simulations
+library(magrittr)    # loads "%>%"
 
 ##### Data #####
 emData <- read_excel('EM Data (2016-2017).xlsx') %>%
-          mutate(Value = round(Value)) # zeroinfl requires integers for Value
+          mutate(Value = round(Value)) %>% # zeroinfl requires integers for Value - might be on a different scale
+          filter(!is.na(Value))
 
 # remove spaces from names
 names(emData) <- str_replace_all(names(emData), ' ', '')
 
 # test methods and site classes
 testMethods <- unique(emData$TestMethod)
-siteClass <- unique(emData$SiteClassDesc)
+siteClass <- c('100', '10,000', '100,000') # unique(emData$SiteClassDesc)
 ```
 
 
@@ -34,8 +36,8 @@ siteClass <- unique(emData$SiteClassDesc)
 #'
 #' @param m Test method
 #' @param c siteClass
-#' @param alpha1 Alpha level for triggering of notification
-#' @param alpha2 Alpha level for triggering of intervention
+#' @param alpha1 Alpha level for Alert
+#' @param alpha2 Alpha level for Action
 #' @param vuongTest Logical flag to enable running the Vuong test to verify that the zero-invlated model is better than standard negative binomial regression
 #' 
 #' @return Returns critical levels for site class c for the test, m at two levels: alpha1 and alpha2.
@@ -57,7 +59,7 @@ critLevels <- function(m, c, alpha1 = 0.95, alpha2 = 0.99, vuongTest = FALSE)
             null0 <- glm.nb(Value ~ 1, data = filter(emData, TestMethod == m &
                                                      SiteClassDesc == c))
     
-            vuong(model0, null0)
+            vuong(model0, null0) # low p-value indicates Zero Inflation model is better
         }
     
         # this function will run one bootstrap sample & return the count statistic
@@ -91,17 +93,45 @@ critLevels <- function(m, c, alpha1 = 0.95, alpha2 = 0.99, vuongTest = FALSE)
                            counts = coef(model0, 'count'),
                            zeros = coef(model0, 'zero'))
         
+        # some of these return NA for some reason - drop these
+        todrop <- which(is.na(bs_samples$t))
+        
+        if(length(todrop) > 0)
+        {
+            bs_samples$t <- bs_samples$t[-todrop,,drop = FALSE]
+            bs_samples$R <- length(bs_samples$t)
+        }
+        
+        # save this for future runs!
         save(bs_samples, file = paste0('boot_', m, '_', c, '.RData'))
     }
+
+    # calculate critical levels
+    btci <- suppressWarnings(boot.ci(bs_samples, conf = c(alpha1, alpha2)))
+    
+    return(c(crit95 = btci$basic[1,5],
+             crit99 = btci$basic[2,5],
+             mean = btci$t0,
+             sd = sqrt(var(bs_samples$t))))
 }
 
 # this contains our main table of results
 mainTable <- data_frame(method = rep(testMethods, each = 3),
-                        class = rep(siteClass, 3))
+                        class = rep(siteClass, 3),
+                        currAlert = NA,
+                        currAction = NA,
+                        crit95 = NA,
+                        crit99 = NA,
+                        N = unlist(map2(method, class, ~ {filter(emData, TestMethod == .x &
+                                                                  SiteClassDesc == .y)$Value %>%
+                                                          length()})),
+                        mean = NA,
+                        sd = NA)
 
 # temporary for loop to get long part of analysis finished
+# --- modify this line to run specific method/class results
 for(i in 1:dim(mainTable)[1])
 {
-    critLevels(mainTable$method[i], mainTable$class[i])
+    mainTable[i,c(5:6, 8:9)] <- critLevels(mainTable$method[i], mainTable$class[i])
 }
 ```
