@@ -47,9 +47,11 @@ critLevels <- function(m, c, alpha1 = 0.95, alpha2 = 0.99, vuongTest = FALSE)
     {
         load(paste0('boot_', m, '_', c, '.RData'))
     }else{
-        model0 <- zeroinfl(Value ~ 1 | SamplingLocation, dist = 'negbin',
-                           data = filter(emData, TestMethod == m &
-                                             SiteClassDesc == c))
+        model0 <- try(zeroinfl(Value ~ 1 | SamplingLocation, dist = 'negbin',
+                               data = filter(emData, TestMethod == m &
+                                                     SiteClassDesc == c)))
+        if(class(model0) == 'try-error')
+            next
     
         # check to see if zeroinfl is a better model than glm.nb
         # seems to be the case for our data...
