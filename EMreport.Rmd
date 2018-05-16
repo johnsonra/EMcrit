@@ -1,6 +1,6 @@
 ---
 title: "EM Report"
-output: pdf_document
+output: word_document
 ---
 
 ```{r setup, include=FALSE}
@@ -16,7 +16,9 @@ library(magrittr)    # loads "%>%"
 
 ##### Data #####
 emData <- read_excel('EM Data (2016-2017).xlsx') %>%
-          mutate(Value = round(Value)) %>% # zeroinfl requires integers for Value - might be on a different scale
+          mutate(Value = round(Value), # zeroinfl requires integers for Value - might be on a different scale
+                 Loc = {sapply(`Sampling Location`, str_split, ' -> ') %>%
+                        sapply(`[`, 2)}) %>% # several models have issues with number of locations - do by room
           filter(!is.na(Value))
 
 # remove spaces from names
@@ -47,12 +49,10 @@ critLevels <- function(m, c, alpha1 = 0.95, alpha2 = 0.99, vuongTest = FALSE)
     {
         load(paste0('boot_', m, '_', c, '.RData'))
     }else{
-        model0 <- try(zeroinfl(Value ~ 1 | SamplingLocation, dist = 'negbin',
+        model0 <- try(zeroinfl(Value ~ 1 | Loc, dist = 'negbin',
                                data = filter(emData, TestMethod == m &
                                                      SiteClassDesc == c)))
-        if(class(model0) == 'try-error')
-            return(rep(-1, 4))
-    
+        
         # check to see if zeroinfl is a better model than glm.nb
         # seems to be the case for our data...
         # this can take awhile, so we won't run it by default
@@ -70,7 +70,7 @@ critLevels <- function(m, c, alpha1 = 0.95, alpha2 = 0.99, vuongTest = FALSE)
             require(pscl)
             require(magrittr)
             retval <- try({
-                zeroinfl(Value ~ 1 | SamplingLocation, dist = 'negbin',
+                zeroinfl(Value ~ 1 | Loc, dist = 'negbin',
                         data = dat[i,], # start with one randomly picked row
                         start = list(count = counts,
                                      zero = zeros)) %>%
@@ -117,23 +117,30 @@ critLevels <- function(m, c, alpha1 = 0.95, alpha2 = 0.99, vuongTest = FALSE)
              sd = sqrt(var(bs_samples$t))))
 }
 
-# this contains our main table of results
-mainTable <- data_frame(method = rep(testMethods, each = 3),
-                        class = rep(siteClass, 3),
-                        currAlert = NA,
-                        currAction = NA,
-                        crit95 = NA,
-                        crit99 = NA,
-                        N = unlist(map2(method, class, ~ {filter(emData, TestMethod == .x &
-                                                                  SiteClassDesc == .y)$Value %>%
-                                                          length()})),
-                        mean = NA,
-                        sd = NA)
-
-# temporary for loop to get long part of analysis finished
-# --- modify this line to run specific method/class results
-for(i in 1:dim(mainTable)[1])
+if(file.exists('mainTable.RData'))
 {
-    mainTable[i,c(5:6, 8:9)] <- critLevels(mainTable$method[i], mainTable$class[i])
+    load('mainTable.RData')
+}else{
+    # this contains our main table of results
+    mainTable <- data_frame(method = rep(testMethods, each = 3),
+                            class = rep(siteClass, 3),
+                            currAlert = NA,
+                            currAction = NA,
+                            crit95 = NA,
+                            crit99 = NA,
+                            N = unlist(map2(method, class, ~ {filter(emData, TestMethod == .x &
+                                                                     SiteClassDesc == .y)$Value %>%
+                                                              length()})),
+                            mean = NA,
+                            sd = NA)
+
+    # temporary for loop to get long part of analysis finished
+    # --- modify this line to run specific method/class results
+    for(i in 1:dim(mainTable)[1])
+    {
+        mainTable[i,c(5:6, 8:9)] <- critLevels(mainTable$method[i], mainTable$class[i])
+    }
+
+    save(mainTable, file = 'mainTable.RData')
 }
 ```
