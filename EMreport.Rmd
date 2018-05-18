@@ -43,23 +43,26 @@ siteClass <- c('100', '10,000', '100,000') # unique(emData$SiteClassDesc)
 #' @param vuongTest Logical flag to enable running the Vuong test to verify that the zero-invlated model is better than standard negative binomial regression
 #' 
 #' @return Returns critical levels for site class c for the test, m at two levels: alpha1 and alpha2.
-critLevels <- function(m, c, alpha1 = 0.95, alpha2 = 0.99, vuongTest = FALSE)
+critLevels <- function(m, c, nsamp = 15000, alpha1 = 0.95, alpha2 = 0.99, vuongTest = FALSE)
 {
     if(file.exists(paste0('boot_', m, '_', c, '.RData')))
     {
         load(paste0('boot_', m, '_', c, '.RData'))
     }else{
-        model0 <- try(zeroinfl(Value ~ 1 | Loc, dist = 'negbin',
-                               data = filter(emData, TestMethod == m &
-                                                     SiteClassDesc == c)))
+        dat <- filter(emData, TestMethod == m & SiteClassDesc == c)
+
+        model0 <- try(zeroinfl(Value ~ 1 | Loc, dist = 'negbin', data = dat), silent = TRUE)
+        
+        # if the this model fails, Loc is probably the problem (and thus probably not important for the model)
+        if(class(model0) == 'try-error')
+            model0 <- zeroinfl(Value ~ 1, dist = 'negbin', data = dat)
         
         # check to see if zeroinfl is a better model than glm.nb
         # seems to be the case for our data...
         # this can take awhile, so we won't run it by default
         if(vuongTest)
         {
-            null0 <- glm.nb(Value ~ 1, data = filter(emData, TestMethod == m &
-                                                     SiteClassDesc == c))
+            null0 <- glm.nb(Value ~ 1, data = dat)
     
             vuong(model0, null0) # low p-value indicates Zero Inflation model is better
         }
@@ -88,9 +91,7 @@ critLevels <- function(m, c, alpha1 = 0.95, alpha2 = 0.99, vuongTest = FALSE)
     
         # bootstrap samples
         set.seed(389427)
-        bs_samples <- boot(filter(emData, TestMethod == m &
-                                          SiteClassDesc == c),
-                           boot_ci, stype = 'i', R = 15000, 
+        bs_samples <- boot(dat, boot_ci, stype = 'i', R = nsamp, 
                            parallel = 'snow', ncpus = detectCores(),
                            counts = coef(model0, 'count'),
                            zeros = coef(model0, 'zero'))
@@ -111,10 +112,9 @@ critLevels <- function(m, c, alpha1 = 0.95, alpha2 = 0.99, vuongTest = FALSE)
     # calculate critical levels
     btci <- suppressWarnings(boot.ci(bs_samples, conf = c(alpha1, alpha2)))
     
-    return(c(crit95 = btci$basic[1,5],
-             crit99 = btci$basic[2,5],
-             mean = btci$t0,
-             sd = sqrt(var(bs_samples$t))))
+    return(c(crit95 = exp(btci$basic[1,5]),
+             crit99 = exp(btci$basic[2,5]),
+             mean = exp(btci$t0)))
 }
 
 if(file.exists('mainTable.RData'))
@@ -124,21 +124,20 @@ if(file.exists('mainTable.RData'))
     # this contains our main table of results
     mainTable <- data_frame(method = rep(testMethods, each = 3),
                             class = rep(siteClass, 3),
-                            currAlert = NA,
-                            currAction = NA,
+                            currAlert = c(1760, 176000, 1760000, NA, 5, 50, 0, 5, 25),
+                            currAction = c(3520, 352000, 3520000, 1, 10, 100, 1, 10, 50),
                             crit95 = NA,
                             crit99 = NA,
                             N = unlist(map2(method, class, ~ {filter(emData, TestMethod == .x &
                                                                      SiteClassDesc == .y)$Value %>%
                                                               length()})),
-                            mean = NA,
-                            sd = NA)
+                            mean = NA)
 
     # temporary for loop to get long part of analysis finished
     # --- modify this line to run specific method/class results
     for(i in 1:dim(mainTable)[1])
     {
-        mainTable[i,c(5:6, 8:9)] <- critLevels(mainTable$method[i], mainTable$class[i])
+        mainTable[i,c(5:6, 8)] <- critLevels(mainTable$method[i], mainTable$class[i])
     }
 
     save(mainTable, file = 'mainTable.RData')
