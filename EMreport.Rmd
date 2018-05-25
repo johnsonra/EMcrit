@@ -179,7 +179,7 @@ select(mainTable, -N) %>%
     kable(digits = c(rep(0, 4), 3, 3, 0, 3), align = c('l', rep('r', 7)))
 ```
 
-The table above gives analysis results of historical environmental montioring data and contains the following columns:
+The table above gives analysis results of historical environmental monitoring data and contains the following columns:
 
  * method - one of three tests: non-viable air, surface contact and viable air.
  * class - the level of expected cleanliness of the room, with lower numbers expected to have fewer environmental contaminants.
@@ -189,4 +189,4 @@ The table above gives analysis results of historical environmental montioring da
  * crit99 - the threshold at which 99% of historical observations have fallen below as calculated by a zero-inflated negative binomial model^†^.
  * mean - the mean level of historical observations as calculated by a zero-inflated negative binomial model^†^.
  
-† The zero-inflated negative binomial model accounts for overdispersion of observations that results in applications where there are an excess of zeros.
+† The zero-inflated negative binomial model accounts for over-dispersion of observations that results in applications where there are an excess of zeros.
