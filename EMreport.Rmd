@@ -13,6 +13,7 @@ library(pscl)        # Zero-inflation negative binomial regression
 library(parallel)    # allows running boot functions in parallel
 library(boot)        # does the boot strap simulations
 library(magrittr)    # loads "%>%"
+library(knitr)
 
 ##### Data #####
 emData <- read_excel('EM Data (2016-2017).xlsx') %>%
@@ -51,11 +52,15 @@ critLevels <- function(m, c, nsamp = 15000, alpha1 = 0.95, alpha2 = 0.99, vuongT
     }else{
         dat <- filter(emData, TestMethod == m & SiteClassDesc == c)
 
+        condLoc <- TRUE
         model0 <- try(zeroinfl(Value ~ 1 | Loc, dist = 'negbin', data = dat), silent = TRUE)
         
         # if the this model fails, Loc is probably the problem (and thus probably not important for the model)
         if(class(model0) == 'try-error')
+        {
+            condLoc <- FALSE
             model0 <- zeroinfl(Value ~ 1, dist = 'negbin', data = dat)
+        }
         
         # check to see if zeroinfl is a better model than glm.nb
         # seems to be the case for our data...
@@ -68,20 +73,34 @@ critLevels <- function(m, c, nsamp = 15000, alpha1 = 0.95, alpha2 = 0.99, vuongT
         }
     
         # this function will run one bootstrap sample & return the count statistic
-        boot_ci <- function(dat, i, counts, zeros)
+        boot_ci <- function(dat, i, counts, zeros, condLoc)
         {
             require(pscl)
             require(magrittr)
-            retval <- try({
-                zeroinfl(Value ~ 1 | Loc, dist = 'negbin',
-                        data = dat[i,], # start with one randomly picked row
-                        start = list(count = counts,
-                                     zero = zeros)) %>%
-                    summary() %>%        # summary object
-                    coef() %>%           # get coefficients
-                    `[[`(1) %>%          # first item is count estimates
-                    `[`(1,1)             # first row/first column = estimate
-            }, silent = TRUE)
+            if(condLoc)
+            {
+                retval <- try({
+                    zeroinfl(Value ~ 1 | Loc, dist = 'negbin',
+                            data = dat[i,], # start with one randomly picked row
+                            start = list(count = counts,
+                                         zero = zeros)) %>%
+                        summary() %>%        # summary object
+                        coef() %>%           # get coefficients
+                        `[[`(1) %>%          # first item is count estimates
+                        `[`(1,1)             # first row/first column = estimate
+                }, silent = TRUE)
+            }else{
+                retval <- try({
+                    zeroinfl(Value ~ 1, dist = 'negbin',
+                            data = dat[i,], # start with one randomly picked row
+                            start = list(count = counts,
+                                         zero = zeros)) %>%
+                        summary() %>%        # summary object
+                        coef() %>%           # get coefficients
+                        `[[`(1) %>%          # first item is count estimates
+                        `[`(1,1)             # first row/first column = estimate
+                }, silent = TRUE)
+            }
         
             if(class(retval) == 'try-error')
                 return(NA)
@@ -94,7 +113,8 @@ critLevels <- function(m, c, nsamp = 15000, alpha1 = 0.95, alpha2 = 0.99, vuongT
         bs_samples <- boot(dat, boot_ci, stype = 'i', R = nsamp, 
                            parallel = 'snow', ncpus = detectCores(),
                            counts = coef(model0, 'count'),
-                           zeros = coef(model0, 'zero'))
+                           zeros = coef(model0, 'zero'),
+                           condLoc = condLoc)
         
         # some of these return NA for some reason - drop these
         todrop <- which(is.na(bs_samples$t))
@@ -143,3 +163,30 @@ if(file.exists('mainTable.RData'))
     save(mainTable, file = 'mainTable.RData')
 }
 ```
+
+```{r mainTable, echo=FALSE}
+# mutate(mainTable,
+#        crit95 = ifelse(crit95 <   1, round(crit95, 3), 
+#                 ifelse(crit95 < 100, round(crit95, 1),
+#                                      round(crit95))),
+#        crit99 = ifelse(crit99 <   1, round(crit99, 3),
+#                 ifelse(crit99 < 100, round(crit99, 1),
+#                                      round(crit99))),
+#        mean   = ifelse(mean   <   1, round(mean, 3),
+#                 ifelse(mean   < 100, round(mean, 1),
+#                                      round(mean)))) %>%
+select(mainTable, -N) %>%
+    kable(digits = c(rep(0, 4), 3, 3, 0, 3), align = c('l', rep('r', 7)))
+```
+
+The table above gives analysis results of historical environmental montioring data and contains the following columns:
+
+ * method - one of three tests: non-viable air, surface contact and viable air.
+ * class - the level of expected cleanliness of the room, with lower numbers expected to have fewer environmental contaminants.
+ * currAlert - the current threshold which, if exceeded, will trigger an alert.
+ * currAction - the current threshold which, if exceeded, will trigger an action to remediate the exception.
+ * crit95 - the threshold at which 95% of historical observations have fallen below as calculated by a zero-inflated negative binomial model^†^.
+ * crit99 - the threshold at which 99% of historical observations have fallen below as calculated by a zero-inflated negative binomial model^†^.
+ * mean - the mean level of historical observations as calculated by a zero-inflated negative binomial model^†^.
+ 
+† The zero-inflated negative binomial model accounts for overdispersion of observations that results in applications where there are an excess of zeros.
