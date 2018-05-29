@@ -165,18 +165,8 @@ if(file.exists('mainTable.RData'))
 ```
 
 ```{r mainTable, echo=FALSE}
-# mutate(mainTable,
-#        crit95 = ifelse(crit95 <   1, round(crit95, 3), 
-#                 ifelse(crit95 < 100, round(crit95, 1),
-#                                      round(crit95))),
-#        crit99 = ifelse(crit99 <   1, round(crit99, 3),
-#                 ifelse(crit99 < 100, round(crit99, 1),
-#                                      round(crit99))),
-#        mean   = ifelse(mean   <   1, round(mean, 3),
-#                 ifelse(mean   < 100, round(mean, 1),
-#                                      round(mean)))) %>%
 select(mainTable, -N) %>%
-    kable(digits = c(rep(0, 4), 3, 3, 0, 3), align = c('l', rep('r', 7)))
+    kable(digits = c(rep(0, 4), 3, 3, 3), align = c('l', rep('r', 6)))
 ```
 
 The table above gives analysis results of historical environmental monitoring data and contains the following columns:
@@ -190,3 +180,42 @@ The table above gives analysis results of historical environmental monitoring da
  * mean - the mean level of historical observations as calculated by a zero-inflated negative binomial model^†^.
  
 † The zero-inflated negative binomial model accounts for over-dispersion of observations that results in applications where there are an excess of zeros.
+
+\newline
+
+\newline
+
+```{r negbin model, echo=FALSE}
+
+mainTable <- mutate(mainTable,
+                    crit95_negbin = NA,
+                    crit99_negbin = NA,
+                    mean_negbin = NA)
+
+for(i in 1:dim(mainTable)[1])
+{
+    null0 <- suppressWarnings(glm.nb(Value ~ 1, data = filter(emData, TestMethod == mainTable$method[i] & 
+                                                              SiteClassDesc == mainTable$class[i]))) %>%
+             summary() %>%
+             `[[`('coefficients')
+    
+    mainTable$crit95_negbin[i] <- exp(null0[1,1] + null0[1,2]*qnorm(0.95))
+    mainTable$crit99_negbin[i] <- exp(null0[1,1] + null0[1,2]*qnorm(0.99))
+    mainTable$mean_negbin[i] <- exp(null0[1,1])
+}
+
+select(mainTable, -N, -crit95, -crit99, -mean) %>%
+    rename(crit95 = crit95_negbin, crit99 = crit99_negbin, mean = mean_negbin) %>%
+    kable(digits = c(rep(0, 4), 3, 3, 3), aligh = c('l', rep('r', 6)))
+```
+
+This second table gives analysis results for a standard negative binomial model of historical environmental monitoring data and contains the following columns:
+
+  * method - one of three tests: non-viable air, surface contact and viable air.
+  * class - the level of expected cleanliness of the room, with lower numbers expected to have fewer environmental contaminants.
+  * currAlert - the current threshold which, if exceeded, will trigger an alert.
+  * currAction - the current threshold which, if exceeded, will trigger an action to remediate the exception.
+  * crit95 - the threshold at which 95% of historical observations have fallen below as estimated by a negative binomial model.
+  * crit99 - the threshold at which 99% of historical observations have fallen below as estimated by a negative binomial model.
+  * mean - the mean level of historical observations as estimated by a negative binomial model.
+  
