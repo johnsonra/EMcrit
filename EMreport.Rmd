@@ -10,8 +10,6 @@ library(tidyverse)   # general data tidying and wrangling
 library(readxl)      # read from excel
 library(stringr)     # string functions
 library(pscl)        # Zero-inflation negative binomial regression
-library(parallel)    # allows running boot functions in parallel
-library(boot)        # does the boot strap simulations
 library(magrittr)    # loads "%>%"
 library(knitr)
 
@@ -46,95 +44,37 @@ siteClass <- c('100', '10,000', '100,000') # unique(emData$SiteClassDesc)
 #' @return Returns critical levels for site class c for the test, m at two levels: alpha1 and alpha2.
 critLevels <- function(m, c, nsamp = 15000, alpha1 = 0.95, alpha2 = 0.99, vuongTest = FALSE)
 {
-    if(file.exists(paste0('boot_', m, '_', c, '.RData')))
-    {
-        load(paste0('boot_', m, '_', c, '.RData'))
-    }else{
-        dat <- filter(emData, TestMethod == m & SiteClassDesc == c)
+    dat <- filter(emData, TestMethod == m & SiteClassDesc == c)
 
-        condLoc <- TRUE
-        model0 <- try(zeroinfl(Value ~ 1 | Loc, dist = 'negbin', data = dat), silent = TRUE)
+    condLoc <- TRUE
+    model0 <- try({zeroinfl(Value ~ 1 | Loc, dist = 'negbin', data = dat) %>%
+                   summary() %>%
+                   coefficients() %>%
+                   `[[`('count')}, silent = TRUE)
         
-        # if the this model fails, Loc is probably the problem (and thus probably not important for the model)
-        if(class(model0) == 'try-error')
-        {
-            condLoc <- FALSE
-            model0 <- zeroinfl(Value ~ 1, dist = 'negbin', data = dat)
-        }
+    # if the this model fails, Loc is probably the problem (and thus probably not important for the model)
+    if(class(model0) == 'try-error')
+    {
+        condLoc <- FALSE
+        model0 <- zeroinfl(Value ~ 1, dist = 'negbin', data = dat) %>%
+                  summary() %>%
+                  coefficients() %>%
+                  `[[`('count')
+    }
         
-        # check to see if zeroinfl is a better model than glm.nb
-        # seems to be the case for our data...
-        # this can take awhile, so we won't run it by default
-        if(vuongTest)
-        {
-            null0 <- glm.nb(Value ~ 1, data = dat)
+    # check to see if zeroinfl is a better model than glm.nb
+    # seems to be the case for our data...
+    # this can take awhile, so we won't run it by default
+    if(vuongTest)
+    {
+        null0 <- glm.nb(Value ~ 1, data = dat)
     
-            vuong(model0, null0) # low p-value indicates Zero Inflation model is better
-        }
-    
-        # this function will run one bootstrap sample & return the count statistic
-        boot_ci <- function(dat, i, counts, zeros, condLoc)
-        {
-            require(pscl)
-            require(magrittr)
-            if(condLoc)
-            {
-                retval <- try({
-                    zeroinfl(Value ~ 1 | Loc, dist = 'negbin',
-                            data = dat[i,], # start with one randomly picked row
-                            start = list(count = counts,
-                                         zero = zeros)) %>%
-                        summary() %>%        # summary object
-                        coef() %>%           # get coefficients
-                        `[[`(1) %>%          # first item is count estimates
-                        `[`(1,1)             # first row/first column = estimate
-                }, silent = TRUE)
-            }else{
-                retval <- try({
-                    zeroinfl(Value ~ 1, dist = 'negbin',
-                            data = dat[i,], # start with one randomly picked row
-                            start = list(count = counts,
-                                         zero = zeros)) %>%
-                        summary() %>%        # summary object
-                        coef() %>%           # get coefficients
-                        `[[`(1) %>%          # first item is count estimates
-                        `[`(1,1)             # first row/first column = estimate
-                }, silent = TRUE)
-            }
-        
-            if(class(retval) == 'try-error')
-                return(NA)
-        
-            return(retval)
-        }
-    
-        # bootstrap samples
-        set.seed(389427)
-        bs_samples <- boot(dat, boot_ci, stype = 'i', R = nsamp, 
-                           parallel = 'snow', ncpus = detectCores(),
-                           counts = coef(model0, 'count'),
-                           zeros = coef(model0, 'zero'),
-                           condLoc = condLoc)
-        
-        # some of these return NA for some reason - drop these
-        todrop <- which(is.na(bs_samples$t))
-        
-        if(length(todrop) > 0)
-        {
-            bs_samples$t <- bs_samples$t[-todrop,,drop = FALSE]
-            bs_samples$R <- length(bs_samples$t)
-        }
-        
-        # save this for future runs!
-        save(bs_samples, file = paste0('boot_', m, '_', c, '.RData'))
+        vuong(model0, null0) # low p-value indicates Zero Inflation model is better
     }
 
-    # calculate critical levels
-    btci <- suppressWarnings(boot.ci(bs_samples, conf = c(alpha1, alpha2)))
-    
-    return(c(crit95 = exp(btci$basic[1,5]),
-             crit99 = exp(btci$basic[2,5]),
-             mean = exp(btci$t0)))
+    return(c(crit95 = exp(model0[1,1] + qnorm(alpha1)*model0[1,2]),
+             crit99 = exp(model0[1,1] + qnorm(alpha2)*model0[1,2]),
+             mean = exp(model0[1,1])))
 }
 
 if(file.exists('mainTable.RData'))
