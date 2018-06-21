@@ -4,12 +4,14 @@ output: word_document
 ---
 
 ```{r setup, include=FALSE}
-knitr::opts_chunk$set(echo = TRUE, cache = TRUE)
+knitr::opts_chunk$set(echo = TRUE)
 library(MASS)        # for glm.nb
 library(tidyverse)   # general data tidying and wrangling
 library(readxl)      # read from excel
 library(stringr)     # string functions
 library(pscl)        # Zero-inflation negative binomial regression
+library(parallel)    # allows running boot functions in parallel
+library(boot)        # does the boot strap simulations
 library(magrittr)    # loads "%>%"
 library(knitr)
 
@@ -44,37 +46,97 @@ siteClass <- c('100', '10,000', '100,000') # unique(emData$SiteClassDesc)
 #' @return Returns critical levels for site class c for the test, m at two levels: alpha1 and alpha2.
 critLevels <- function(m, c, nsamp = 15000, alpha1 = 0.95, alpha2 = 0.99, vuongTest = FALSE)
 {
-    dat <- filter(emData, TestMethod == m & SiteClassDesc == c)
+    if(file.exists(paste0('boot_', m, '_', c, '.RData')))
+    {
+        load(paste0('boot_', m, '_', c, '.RData'))
+    }else{
+        dat <- filter(emData, TestMethod == m & SiteClassDesc == c)
 
-    condLoc <- TRUE
-    model0 <- try({zeroinfl(Value ~ 1 | Loc, dist = 'negbin', data = dat) %>%
-                   summary() %>%
-                   coefficients() %>%
-                   `[[`('count')}, silent = TRUE)
+        condLoc <- TRUE
+        model0 <- try(zeroinfl(Value ~ 1 | Loc, dist = 'poisson', data = dat), silent = TRUE)
         
-    # if the this model fails, Loc is probably the problem (and thus probably not important for the model)
-    if(class(model0) == 'try-error')
-    {
-        condLoc <- FALSE
-        model0 <- zeroinfl(Value ~ 1, dist = 'negbin', data = dat) %>%
-                  summary() %>%
-                  coefficients() %>%
-                  `[[`('count')
-    }
+        # if the this model fails, Loc is probably the problem (and thus probably not important for the model)
+        if(class(model0) == 'try-error')
+        {
+            condLoc <- FALSE
+            model0 <- zeroinfl(Value ~ 1, dist = 'poisson', data = dat)
+        }
         
-    # check to see if zeroinfl is a better model than glm.nb
-    # seems to be the case for our data...
-    # this can take awhile, so we won't run it by default
-    if(vuongTest)
-    {
-        null0 <- glm.nb(Value ~ 1, data = dat)
+        # check to see if zeroinfl is a better model than glm.nb
+        # seems to be the case for our data...
+        # this can take awhile, so we won't run it by default
+        if(vuongTest)
+        {
+            null0 <- glm.nb(Value ~ 1, data = dat)
+            znb0 <- zeroinfl(Value ~ 1 | Loc, dist = 'negbin', data = dat)
     
-        vuong(model0, null0) # low p-value indicates Zero Inflation model is better
+            vuong(znb0, null0) # large positive values and low p-values indicate Zero Inflation model is better
+            vuong(model0, znb0) # large negative values and low p-values indicate negative binomial model is better
+        }
+    
+        # this function will run one bootstrap sample & return the count statistic
+        boot_ci <- function(dat, i, counts, zeros, condLoc)
+        {
+            require(pscl)
+            require(magrittr)
+            if(condLoc)
+            {
+                retval <- try({
+                    zeroinfl(Value ~ 1 | Loc, dist = 'poisson',
+                            data = dat[i,], # start with one randomly picked row
+                            start = list(count = counts,
+                                         zero = zeros)) %>%
+                        summary() %>%        # summary object
+                        coef() %>%           # get coefficients
+                        `[[`(1) %>%          # first item is count estimates
+                        `[`(1,1)             # first row/first column = estimate
+                }, silent = TRUE)
+            }else{
+                retval <- try({
+                    zeroinfl(Value ~ 1, dist = 'poisson',
+                            data = dat[i,], # start with one randomly picked row
+                            start = list(count = counts,
+                                         zero = zeros)) %>%
+                        summary() %>%        # summary object
+                        coef() %>%           # get coefficients
+                        `[[`(1) %>%          # first item is count estimates
+                        `[`(1,1)             # first row/first column = estimate
+                }, silent = TRUE)
+            }
+        
+            if(class(retval) == 'try-error')
+                return(NA)
+        
+            return(retval)
+        }
+    
+        # bootstrap samples
+        set.seed(389427)
+        bs_samples <- boot(dat, boot_ci, stype = 'i', R = nsamp, 
+                           parallel = 'snow', ncpus = detectCores(),
+                           counts = coef(model0, 'count'),
+                           zeros = coef(model0, 'zero'),
+                           condLoc = condLoc)
+        
+        # some of these return NA for some reason - drop these
+        todrop <- which(is.na(bs_samples$t))
+        
+        if(length(todrop) > 0)
+        {
+            bs_samples$t <- bs_samples$t[-todrop,,drop = FALSE]
+            bs_samples$R <- length(bs_samples$t)
+        }
+        
+        # save this for future runs!
+        save(bs_samples, file = paste0('boot_', m, '_', c, '.RData'))
     }
 
-    return(c(crit95 = exp(model0[1,1] + qnorm(alpha1)*model0[1,2]),
-             crit99 = exp(model0[1,1] + qnorm(alpha2)*model0[1,2]),
-             mean = exp(model0[1,1])))
+    # calculate critical levels
+    btci <- suppressWarnings(boot.ci(bs_samples, conf = c(alpha1, alpha2)))
+    
+    return(c(crit95 = exp(btci$basic[1,5]),
+             crit99 = exp(btci$basic[2,5]),
+             mean = exp(btci$t0)))
 }
 
 if(file.exists('mainTable.RData'))
@@ -84,20 +146,16 @@ if(file.exists('mainTable.RData'))
     # this contains our main table of results
     mainTable <- data_frame(method = rep(testMethods, each = 3),
                             class = rep(siteClass, 3),
-                            currAlert = c(1760, 176000, 1760000, NA, 5, 50, 0, 5, 25),
-                            currAction = c(3520, 352000, 3520000, 1, 10, 100, 1, 10, 50),
                             crit95 = NA,
                             crit99 = NA,
-                            N = unlist(map2(method, class, ~ {filter(emData, TestMethod == .x &
-                                                                     SiteClassDesc == .y)$Value %>%
-                                                              length()})),
-                            mean = NA)
+                            bestModel = c(rep("NB", 3), rep("~", 2), "NB", "~", rep("NB", 2)),
+                            p = c(rep("<2e-16", 3), rep(0.48, 2), 0.002, 0.27, 0.002, "7e-6"))
 
     # temporary for loop to get long part of analysis finished
     # --- modify this line to run specific method/class results
     for(i in 1:dim(mainTable)[1])
     {
-        mainTable[i,c(5:6, 8)] <- critLevels(mainTable$method[i], mainTable$class[i])
+        mainTable[i,c(3:4)] <- critLevels(mainTable$method[i], mainTable$class[i])[1:2]
     }
 
     save(mainTable, file = 'mainTable.RData')
@@ -105,57 +163,16 @@ if(file.exists('mainTable.RData'))
 ```
 
 ```{r mainTable, echo=FALSE}
-select(mainTable, -N) %>%
-    kable(digits = c(rep(0, 4), 3, 3, 3), align = c('l', rep('r', 6)))
+kable(mainTable, digits = c(rep(0, 2), 3, 3, 0, 0), align = c('l', rep('r', 5)))
 ```
 
 The table above gives analysis results of historical environmental monitoring data and contains the following columns:
 
  * method - one of three tests: non-viable air, surface contact and viable air.
  * class - the level of expected cleanliness of the room, with lower numbers expected to have fewer environmental contaminants.
- * currAlert - the current threshold which, if exceeded, will trigger an alert.
- * currAction - the current threshold which, if exceeded, will trigger an action to remediate the exception.
- * crit95 - the threshold at which 95% of historical observations have fallen below as calculated by a zero-inflated negative binomial model^†^.
- * crit99 - the threshold at which 99% of historical observations have fallen below as calculated by a zero-inflated negative binomial model^†^.
- * mean - the mean level of historical observations as calculated by a zero-inflated negative binomial model^†^.
+ * crit95 - the threshold at which 95% of historical observations have fallen below as calculated by a zero-inflated Poisson model^†^.
+ * crit99 - the threshold at which 99% of historical observations have fallen below as calculated by a zero-inflated Poisson model^†^.
+ * bestModel - indicates those test method / class combinations for which the Negative Binomial model was a statistically significantly better fit than the Poisson model. Those labeled with a '~' indicate that the Poisson and the Negative Binomial models were statistically similar in terms of model fit.
+ * p - the p-value of the Vuong test comparing the Negative Binomial and Poisson models. Statistically significant p-values indicate the model in the bestModel column is a better fit.
  
-† The zero-inflated negative binomial model accounts for over-dispersion of observations that results in applications where there are an excess of zeros.
-
-\newline
-
-\newline
-
-```{r negbin model, echo=FALSE}
-
-mainTable <- mutate(mainTable,
-                    crit95_negbin = NA,
-                    crit99_negbin = NA,
-                    mean_negbin = NA)
-
-for(i in 1:dim(mainTable)[1])
-{
-    null0 <- suppressWarnings(glm.nb(Value ~ 1, data = filter(emData, TestMethod == mainTable$method[i] & 
-                                                              SiteClassDesc == mainTable$class[i]))) %>%
-             summary() %>%
-             `[[`('coefficients')
-    
-    mainTable$crit95_negbin[i] <- exp(null0[1,1] + null0[1,2]*qnorm(0.95))
-    mainTable$crit99_negbin[i] <- exp(null0[1,1] + null0[1,2]*qnorm(0.99))
-    mainTable$mean_negbin[i] <- exp(null0[1,1])
-}
-
-select(mainTable, -N, -crit95, -crit99, -mean) %>%
-    rename(crit95 = crit95_negbin, crit99 = crit99_negbin, mean = mean_negbin) %>%
-    kable(digits = c(rep(0, 4), 3, 3, 3), aligh = c('l', rep('r', 6)))
-```
-
-This second table gives analysis results for a standard negative binomial model of historical environmental monitoring data and contains the following columns:
-
-  * method - one of three tests: non-viable air, surface contact and viable air.
-  * class - the level of expected cleanliness of the room, with lower numbers expected to have fewer environmental contaminants.
-  * currAlert - the current threshold which, if exceeded, will trigger an alert.
-  * currAction - the current threshold which, if exceeded, will trigger an action to remediate the exception.
-  * crit95 - the threshold at which 95% of historical observations have fallen below as estimated by a negative binomial model.
-  * crit99 - the threshold at which 99% of historical observations have fallen below as estimated by a negative binomial model.
-  * mean - the mean level of historical observations as estimated by a negative binomial model.
-  
+† The zero-inflated Poisson model accounts for over-dispersion of observations that results in applications where there are an excess of zeros.
